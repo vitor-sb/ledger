@@ -1,0 +1,177 @@
+openapi: 3.0.3
+info:
+  title: Ledger API
+  version: 0.1.0
+  description: |
+    Ledger de despesas agendadas com previsão de pagamentos futuros.
+    Dinheiro sempre em centavos (inteiro). Datas no formato YYYY-MM-DD.
+    Paginação por cursor opaco: envie `next_cursor` como `after` na chamada seguinte.
+paths:
+  /expenses:
+    post:
+      summary: Cadastra uma despesa
+      operationId: registerExpense
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterExpenseRequest' }
+      responses:
+        '201': { description: Criada, content: { application/json: { schema: { $ref: '#/components/schemas/Expense' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+    get:
+      summary: Lista despesas (paginado por cursor)
+      operationId: listExpenses
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/After' }
+      responses:
+        '200': { description: Página de despesas, content: { application/json: { schema: { $ref: '#/components/schemas/ExpensePage' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /expenses/{id}/cancellation:
+    post:
+      summary: Cancela a despesa a partir de uma data
+      description: Pagamentos com vencimento a partir de `effective_date` deixam de existir; os anteriores permanecem.
+      operationId: cancelExpense
+      parameters:
+        - { $ref: '#/components/parameters/ExpenseId' }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CancelExpenseRequest' }
+      responses:
+        '201': { description: Cancelada, content: { application/json: { schema: { $ref: '#/components/schemas/Expense' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /expenses/{id}/skipped-installments:
+    post:
+      summary: Pula uma parcela sem alterar o restante da série
+      operationId: skipInstallment
+      parameters:
+        - { $ref: '#/components/parameters/ExpenseId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SkipInstallmentRequest' }
+      responses:
+        '201': { description: Parcela pulada, content: { application/json: { schema: { $ref: '#/components/schemas/Expense' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /upcoming-payments:
+    get:
+      summary: Pagamentos futuros em ordem de vencimento (paginado por cursor)
+      operationId: listUpcomingPayments
+      parameters:
+        - { $ref: '#/components/parameters/From' }
+        - { $ref: '#/components/parameters/Months' }
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/After' }
+      responses:
+        '200': { description: Página de pagamentos, content: { application/json: { schema: { $ref: '#/components/schemas/UpcomingPaymentsPage' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /monthly-forecast:
+    get:
+      summary: Total e quantidade de pagamentos por mês
+      operationId: getMonthlyForecast
+      parameters:
+        - { $ref: '#/components/parameters/From' }
+        - { $ref: '#/components/parameters/Months' }
+      responses:
+        '200': { description: Previsão mensal, content: { application/json: { schema: { $ref: '#/components/schemas/MonthlyForecast' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+components:
+  parameters:
+    ExpenseId: { name: id, in: path, required: true, schema: { type: integer, format: int64, minimum: 1 } }
+    Limit:     { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+    After:     { name: after, in: query, description: Cursor opaco devolvido em next_cursor, schema: { type: string } }
+    From:      { name: from, in: query, description: Início do período (padrão hoje), schema: { type: string, format: date } }
+    Months:    { name: months, in: query, schema: { type: integer, minimum: 1, maximum: 24, default: 3 } }
+  responses:
+    BadRequest:    { description: Requisição malformada, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    NotFound:      { description: Não encontrado, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    Conflict:      { description: Conflito de estado, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    Unprocessable: { description: Regra de negócio violada, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+  schemas:
+    Recurrence:
+      type: string
+      enum: [UNICA, DIARIA, SEMANAL, QUINZENAL, MENSAL, TRIMESTRAL, SEMESTRAL, ANUAL]
+    RegisterExpenseRequest:
+      type: object
+      required: [title, amount_cents, first_due_date, recurrence]
+      properties:
+        title: { type: string, minLength: 1, maxLength: 30 }
+        amount_cents: { type: integer, format: int64, minimum: 1 }
+        first_due_date: { type: string, format: date }
+        recurrence: { $ref: '#/components/schemas/Recurrence' }
+        installment_count: { type: integer, minimum: 0, description: '0 ou ausente = sem fim (só recorrentes)' }
+    CancelExpenseRequest:
+      type: object
+      properties:
+        effective_date: { type: string, format: date, description: Padrão hoje }
+    SkipInstallmentRequest:
+      type: object
+      required: [installment_number]
+      properties:
+        installment_number: { type: integer, minimum: 1 }
+    Expense:
+      type: object
+      required: [id, title, amount_cents, first_due_date, recurrence]
+      properties:
+        id: { type: integer, format: int64 }
+        title: { type: string }
+        amount_cents: { type: integer, format: int64 }
+        first_due_date: { type: string, format: date }
+        recurrence: { $ref: '#/components/schemas/Recurrence' }
+        installment_count: { type: integer }
+        cancelled_from: { type: string, format: date }
+        skipped_installments: { type: array, items: { type: integer } }
+    ExpensePage:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Expense' } }
+        next_cursor: { type: string, description: Ausente na última página }
+    ScheduledPayment:
+      type: object
+      required: [expense_id, title, due_date, amount_cents, installment_number]
+      properties:
+        expense_id: { type: integer, format: int64 }
+        title: { type: string }
+        due_date: { type: string, format: date }
+        amount_cents: { type: integer, format: int64 }
+        installment_number: { type: integer, minimum: 1 }
+    UpcomingPaymentsPage:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/ScheduledPayment' } }
+        next_cursor: { type: string, description: Ausente na última página }
+    MonthTotal:
+      type: object
+      required: [month, total_cents, payment_count]
+      properties:
+        month: { type: string, example: 2026-11 }
+        total_cents: { type: integer, format: int64 }
+        payment_count: { type: integer }
+    MonthlyForecast:
+      type: object
+      required: [from, to, total_cents, months]
+      properties:
+        from: { type: string, format: date }
+        to: { type: string, format: date }
+        total_cents: { type: integer, format: int64 }
+        months: { type: array, items: { $ref: '#/components/schemas/MonthTotal' } }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }

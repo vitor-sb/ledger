@@ -1,0 +1,17 @@
+# Postgres só do ledger, na porta 5434 (5432/5433 são de outros projetos).
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: ledger_postgres
+    environment:
+      POSTGRES_USER: ledger
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?copy .env.example to .env and set POSTGRES_PASSWORD}
+      POSTGRES_DB: ledger
+    ports: ["5434:5432"]
+    volumes: [ledger_pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ledger"]
+      interval: 2s
+      retries: 15
+volumes:
+  ledger_pgdata:

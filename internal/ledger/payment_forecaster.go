@@ -3,6 +3,7 @@ package ledger
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"slices"
 	"time"
 )
@@ -14,12 +15,13 @@ type ExpenseSource interface {
 
 // PaymentForecaster answers "what will I pay and when", without changing anything.
 type PaymentForecaster struct {
-	source ExpenseSource
-	clock  Clock
+	source  ExpenseSource
+	clock   Clock
+	workers int // goroutines used to expand expenses; 1 = sequential
 }
 
 func NewPaymentForecaster(source ExpenseSource, clock Clock) *PaymentForecaster {
-	return &PaymentForecaster{source: source, clock: clock}
+	return &PaymentForecaster{source: source, clock: clock, workers: runtime.GOMAXPROCS(0)}
 }
 
 type UpcomingPaymentsRequest struct {
@@ -114,14 +116,9 @@ func (f *PaymentForecaster) paymentsIn(ctx context.Context, from time.Time, mont
 	if err != nil {
 		return Period{}, nil, fmt.Errorf("list expenses: %w", err)
 	}
-	capacity := 0
-	for _, expense := range expenses {
-		capacity += expense.paymentsCapacity(period)
+	payments, err := expandPayments(ctx, expenses, period, f.workers)
+	if err != nil {
+		return Period{}, nil, fmt.Errorf("expand payments: %w", err)
 	}
-	payments := make([]ScheduledPayment, 0, capacity)
-	for _, expense := range expenses {
-		payments = expense.appendScheduledPaymentsIn(payments, period)
-	}
-	slices.SortFunc(payments, func(a, b ScheduledPayment) int { return a.Key().Compare(b.Key()) })
 	return period, payments, nil
 }

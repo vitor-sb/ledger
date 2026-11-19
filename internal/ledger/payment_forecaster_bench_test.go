@@ -3,6 +3,7 @@ package ledger
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -28,18 +29,23 @@ func syntheticExpenses(n int) fixedExpenses {
 	return expenses
 }
 
+// BenchmarkMonthlyForecast compares the sequential path (workers=1) with the concurrent one
+// at several sizes. To see the effect of the core count: go test -bench . -cpu 1,2,4
 func BenchmarkMonthlyForecast(b *testing.B) {
 	for _, n := range []int{100, 1_000, 10_000, 50_000} {
-		b.Run(fmt.Sprintf("expenses=%d", n), func(b *testing.B) {
-			forecaster := NewPaymentForecaster(syntheticExpenses(n), func() time.Time { return date("2026-11-01") })
-			ctx := context.Background()
-			b.ReportAllocs()
-			for b.Loop() {
-				if _, err := forecaster.MonthlyForecast(ctx, time.Time{}, MaxPeriodMonths); err != nil {
-					b.Fatal(err)
+		for _, workers := range []int{1, runtime.GOMAXPROCS(0)} {
+			b.Run(fmt.Sprintf("expenses=%d/workers=%d", n, workers), func(b *testing.B) {
+				forecaster := NewPaymentForecaster(syntheticExpenses(n), func() time.Time { return date("2026-11-01") })
+				forecaster.workers = workers
+				ctx := context.Background()
+				b.ReportAllocs()
+				for b.Loop() {
+					if _, err := forecaster.MonthlyForecast(ctx, time.Time{}, MaxPeriodMonths); err != nil {
+						b.Fatal(err)
+					}
 				}
-			}
-		})
+			})
+		}
 	}
 }
 

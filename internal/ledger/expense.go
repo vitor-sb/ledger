@@ -119,7 +119,12 @@ func (k PaymentKey) Compare(other PaymentKey) int {
 // NOTE: iterates from the first installment, O(installments since the start);
 // jump straight to the period if a very old daily expense ever becomes a bottleneck.
 func (e Expense) ScheduledPaymentsIn(period Period) []ScheduledPayment {
-	var payments []ScheduledPayment
+	return e.appendScheduledPaymentsIn(make([]ScheduledPayment, 0, e.paymentsCapacity(period)), period)
+}
+
+// appendScheduledPaymentsIn is ScheduledPaymentsIn writing into dst, so a caller expanding
+// many expenses can share one slice instead of allocating (and copying) one per expense.
+func (e Expense) appendScheduledPaymentsIn(payments []ScheduledPayment, period Period) []ScheduledPayment {
 	for n := 1; e.HasInstallment(n); n++ {
 		due := e.dueDateOf(n)
 		if due.After(period.To) || e.isCancelledAt(due) {
@@ -130,4 +135,23 @@ func (e Expense) ScheduledPaymentsIn(period Period) []ScheduledPayment {
 		}
 	}
 	return payments
+}
+
+// paymentsCapacity is an upper bound of how many payments the expense can have inside the
+// period. It exists only to size slices up front: growing by append copies the whole
+// slice every time it doubles, and a daily expense over 24 months is ~730 payments.
+func (e Expense) paymentsCapacity(period Period) int {
+	step := recurrenceSteps[e.Recurrence]
+	days := int(period.To.Sub(period.From).Hours()/24) + 1
+	capacity := 1 // RecurrenceOnce
+	switch {
+	case step.days > 0:
+		capacity = days/step.days + 1
+	case step.months > 0:
+		capacity = days/(28*step.months) + 1 // 28 = shortest month, so this never undercounts
+	}
+	if e.InstallmentCount > 0 {
+		capacity = min(capacity, e.InstallmentCount)
+	}
+	return capacity
 }

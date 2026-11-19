@@ -3,6 +3,7 @@ package ledger
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"slices"
 	"time"
 )
@@ -14,12 +15,13 @@ type ExpenseSource interface {
 
 // PaymentForecaster answers "what will I pay and when", without changing anything.
 type PaymentForecaster struct {
-	source ExpenseSource
-	clock  Clock
+	source  ExpenseSource
+	clock   Clock
+	workers int // goroutines used to expand expenses; 1 = sequential
 }
 
 func NewPaymentForecaster(source ExpenseSource, clock Clock) *PaymentForecaster {
-	return &PaymentForecaster{source: source, clock: clock}
+	return &PaymentForecaster{source: source, clock: clock, workers: runtime.GOMAXPROCS(0)}
 }
 
 type UpcomingPaymentsRequest struct {
@@ -81,10 +83,15 @@ func (f *PaymentForecaster) MonthlyForecast(ctx context.Context, from time.Time,
 		return MonthlyForecast{}, err
 	}
 	forecast := MonthlyForecast{Period: period, Months: []MonthTotal{}}
+	// Payments come sorted, so a month change is detected by comparing year and month as
+	// ints. Formatting the string for every payment allocated once per payment (the
+	// profile showed it); now it is formatted once per month.
+	var lastYear int
+	var lastMonth time.Month
 	for _, p := range payments {
-		month := p.DueDate.Format("2006-01")
-		if n := len(forecast.Months); n == 0 || forecast.Months[n-1].Month != month {
-			forecast.Months = append(forecast.Months, MonthTotal{Month: month})
+		if year, month, _ := p.DueDate.Date(); len(forecast.Months) == 0 || year != lastYear || month != lastMonth {
+			lastYear, lastMonth = year, month
+			forecast.Months = append(forecast.Months, MonthTotal{Month: p.DueDate.Format("2006-01")})
 		}
 		current := &forecast.Months[len(forecast.Months)-1]
 		current.TotalCents += p.AmountCents
@@ -109,10 +116,9 @@ func (f *PaymentForecaster) paymentsIn(ctx context.Context, from time.Time, mont
 	if err != nil {
 		return Period{}, nil, fmt.Errorf("list expenses: %w", err)
 	}
-	var payments []ScheduledPayment
-	for _, expense := range expenses {
-		payments = append(payments, expense.ScheduledPaymentsIn(period)...)
+	payments, err := expandPayments(ctx, expenses, period, f.workers)
+	if err != nil {
+		return Period{}, nil, fmt.Errorf("expand payments: %w", err)
 	}
-	slices.SortFunc(payments, func(a, b ScheduledPayment) int { return a.Key().Compare(b.Key()) })
 	return period, payments, nil
 }

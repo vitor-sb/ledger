@@ -2,6 +2,7 @@
 .env
 *.test
 *.out
+*.prof
 .idea/
 .vscode/
 

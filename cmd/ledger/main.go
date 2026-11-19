@@ -55,6 +55,18 @@ func run() error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
+	servers := []*http.Server{httpServer}
+	if pprofAddress := os.Getenv("PPROF_ADDR"); pprofAddress != "" {
+		pprofServer := newPprofServer(pprofAddress)
+		servers = append(servers, pprofServer)
+		go func() {
+			slog.Info("pprof listening", "address", pprofAddress)
+			if err := pprofServer.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+				slog.Error("pprof", "err", err) // profiling is optional: log it, keep the API up
+			}
+		}()
+	}
+
 	// Graceful shutdown: stop accepting, let in-flight requests finish, then close the pool.
 	shutdownFinished := make(chan struct{})
 	go func() {
@@ -62,8 +74,10 @@ func run() error {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := httpServer.Shutdown(shutdownCtx); err != nil {
-			slog.Error("shutdown", "err", err)
+		for _, server := range servers {
+			if err := server.Shutdown(shutdownCtx); err != nil {
+				slog.Error("shutdown", "addr", server.Addr, "err", err)
+			}
 		}
 	}()
 

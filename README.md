@@ -7,6 +7,8 @@ cp .env.example .env   # defina POSTGRES_PASSWORD (o .env não é versionado)
 make db     # sobe o Postgres (porta 5434)
 make run    # API em :8080 (aplica as migrations ao subir)
 make test   # unitários + integração, com -race
+make bench  # benchmarks (não precisam de banco)
+make fuzz   # fuzzing das regras de data e da expansão (FUZZTIME=30s)
 ```
 
 ## API
@@ -40,6 +42,7 @@ internal/ledger                 regras de negócio, sem HTTP/JSON/SQL
   expense.go                    Expense, ScheduledPayment, expansão das parcelas
   expense_registry.go           ExpenseRegistry: cadastrar, cancelar, pular parcela, listar
   payment_forecaster.go         PaymentForecaster: pagamentos futuros e previsão mensal
+  expansion.go                  expansão concorrente das despesas em pagamentos (errgroup + merge)
 internal/postgres               ExpenseRepository (pgx) + migrations embutidas
 internal/httpapi                handlers, DTOs, cursores, middlewares
 ```
@@ -53,8 +56,38 @@ internal/httpapi                handlers, DTOs, cursores, middlewares
 - Dinheiro em centavos (`int64`); fim de mês sem drift (31/jan -> 28/fev -> 31/mar).
 - Paginação keyset: `WHERE id > $cursor ORDER BY id LIMIT n`, custo constante em qualquer página.
 
+## Desempenho
+
+A previsão carrega todas as despesas e expande cada uma em pagamentos. Os números abaixo são de
+`make bench` (24 meses, mix de recorrências com 1/8 de despesas diárias), numa máquina de 4 vCPUs,
+uma rodada só: servem para comparar as etapas, não como garantia.
+
+| Despesas | Inicial | Pré-alocação | + concorrência (4 workers) |
+|---|---|---|---|
+| 1.000 | 135 ms | 81 ms | 37 ms |
+| 10.000 | 1,46 s | 0,96 s | 0,48 s |
+| 50.000 | 9,2 s | 5,1 s | 2,4 s |
+
+O que mudou e por quê (o profile guiou cada passo, ver `make profile`):
+
+- **Pré-alocação**: o `append` crescendo o slice e o `Format` do mês a cada pagamento dominavam o custo.
+  Dimensionar o slice de antemão e formatar o mês só quando ele muda tirou 1,2 milhão de alocações em
+  10 mil despesas (31 sobraram) e baixou a memória de 626 MB para 75 MB.
+- **Concorrência** (`expansion.go`): as despesas são independentes, então cada goroutine expande e ordena
+  um bloco, e os blocos ordenados são mesclados. `PaymentKey` é uma ordem total sem empates, então o
+  resultado não depende do número de workers (o teste compara com a versão sequencial). Abaixo de
+  128 despesas por worker nada disso é usado. Custo: ~3x mais memória, porque o merge copia.
+- **Fuzzing**: `addMonthsClamped` e a expansão têm invariantes (dentro do período, ordenado, sem
+  cancelado/pulado, dentro da capacidade estimada) verificadas com entradas geradas.
+- **pprof** (opcional): `PPROF_ADDR=127.0.0.1:6060 make run` abre os profiles num listener separado
+  da API, desligado por padrão. `go tool pprof http://127.0.0.1:6060/debug/pprof/profile?seconds=10`.
+
 ## Limites conhecidos
 
-- A previsão é calculada em memória a cada chamada (todas as despesas, janela de até 24 meses). Serve para
-  milhares de despesas; depois disso, mover a expansão para SQL (`generate_series`) ou fazer cache.
-- Sem autenticação nem multiusuário. Sem observabilidade além de logs.
+- A previsão ainda é calculada em memória a cada chamada (todas as despesas, janela de até 24 meses).
+  Pelos benchmarks acima, até ~1.000 despesas responde em dezenas de milissegundos; com 10 mil já passa
+  de meio segundo. Daí em diante, mover a expansão para SQL (`generate_series`) ou fazer cache.
+- `MonthlyForecast` só precisa dos totais por mês e hoje também ordena todos os pagamentos; agregar sem
+  ordenar seria o próximo ganho barato (não feito).
+- A expansão de uma despesa diária percorre as parcelas desde a primeira data de vencimento.
+- Sem autenticação nem multiusuário. Sem observabilidade além de logs e do pprof opcional.
